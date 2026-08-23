@@ -61,6 +61,377 @@
   }
   .status-bar.active { color: #4ade80; }
 
+  .controls { padding: 12px 16px; display: flex; gap: 8px; flex-wrap: wrap; }
+  .controls button { flex: 1; min-width: 140px; }
+  button {
+    border: none; border-radius: 10px; padding: 12px 14px;
+    font-size: 14px; font-weight: 600; cursor: pointer;
+  }
+  .btn-primary { background: #0ea5e9; color: white; flex: 1; }
+  .btn-secondary { background: #334155; color: #e2e8f0; flex: 1; }
+  .btn-danger { background: #dc2626; color: white; }
+  .btn-ghost { background: transparent; color: #94a3b8; border: 1px solid #334155; }
+
+  .manual-row { padding: 0 16px 8px; display: flex; gap: 8px; }
+  .manual-row input {
+    flex: 1; padding: 10px 12px; border-radius: 10px; border: 1px solid #334155;
+    background: #1e293b; color: #f1f5f9; font-size: 14px;
+  }
+
+  .list-section { padding: 12px 16px 100px; }
+  .list-header {
+    display: flex; justify-content: space-between; align-items: center;
+    margin-bottom: 8px;
+  }
+  .list-header h2 { font-size: 14px; margin: 0; color: #f1f5f9; }
+  .count-badge {
+    background: #0ea5e9; color: white; font-size: 12px; font-weight: 700;
+    padding: 2px 10px; border-radius: 999px;
+  }
+  .item-card {
+    background: #1e293b; border: 1px solid #334155; border-radius: 12px;
+    padding: 12px; margin-bottom: 8px;
+    display: flex; align-items: center; justify-content: space-between;
+    animation: pop 0.25s ease;
+  }
+  @keyframes pop { from { transform: scale(0.96); opacity: 0.5; } to { transform: scale(1); opacity: 1; } }
+  .item-info { flex: 1; min-width: 0; }
+  .item-part { font-size: 14px; font-weight: 700; color: #f1f5f9; word-break: break-all; }
+  .item-time { font-size: 11px; color: #64748b; margin-top: 2px; }
+  .item-qty {
+    display: flex; align-items: center; gap: 8px; margin-left: 10px;
+  }
+  .qty-btn {
+    width: 30px; height: 30px; border-radius: 8px; background: #334155;
+    color: #e2e8f0; font-size: 16px; font-weight: 700; padding: 0;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .qty-num { font-size: 18px; font-weight: 800; color: #22d3ee; min-width: 28px; text-align: center; }
+
+  .empty-state { text-align: center; padding: 40px 16px; color: #64748b; font-size: 13px; }
+
+  .footer-bar {
+    position: fixed; bottom: 0; left: 0; right: 0;
+    background: #1e293b; border-top: 1px solid #334155;
+    padding: 10px 16px calc(10px + env(safe-area-inset-bottom));
+    display: flex; gap: 8px;
+    z-index: 30;
+  }
+  .beep-flash { display: none; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>📦 QR Stock Count</h1>
+  <p id="subtitle">สแกน QR แล้วนับเพิ่มทีละ 1 ชิ้นอัตโนมัติ</p>
+</div>
+
+<div class="scanner-wrap">
+  <video id="video" playsinline muted></video>
+  <div class="scan-frame"><div class="scan-box"></div></div>
+  <div class="flash" id="flash"></div>
+</div>
+
+<div class="status-bar" id="statusBar">กด "เริ่มสแกน" เพื่อเปิดกล้อง</div>
+
+<div class="controls">
+  <button class="btn-primary" id="toggleBtn">▶ เริ่มสแกน</button>
+  <button class="btn-secondary" id="uploadBtn">🖼 สแกนจากรูปภาพ</button>
+  <input type="file" id="fileInput" accept="image/*" style="display:none">
+</div>
+
+<div class="manual-row">
+  <input type="text" id="manualInput" placeholder="หรือพิมพ์ Part No. เอง แล้วกด Enter">
+</div>
+
+<div class="list-section">
+  <div class="list-header">
+    <h2>รายการที่นับแล้ว</h2>
+    <span class="count-badge" id="totalBadge">0 รายการ</span>
+  </div>
+  <div id="itemList">
+    <div class="empty-state" id="emptyState">ยังไม่มีรายการที่สแกน</div>
+  </div>
+</div>
+
+<div class="footer-bar">
+  <button class="btn-ghost" id="clearBtn">🗑 ล้างทั้งหมด</button>
+  <button class="btn-secondary" id="exportBtn" style="flex:1">⬇ Export CSV</button>
+</div>
+
+<script>
+(function(){
+  const video = document.getElementById('video');
+  const toggleBtn = document.getElementById('toggleBtn');
+  const statusBar = document.getElementById('statusBar');
+  const flash = document.getElementById('flash');
+  const itemList = document.getElementById('itemList');
+  const emptyState = document.getElementById('emptyState');
+  const totalBadge = document.getElementById('totalBadge');
+  const manualInput = document.getElementById('manualInput');
+  const clearBtn = document.getElementById('clearBtn');
+  const exportBtn = document.getElementById('exportBtn');
+  const uploadBtn = document.getElementById('uploadBtn');
+  const fileInput = document.getElementById('fileInput');
+
+  let stream = null;
+  let scanning = false;
+  let canvas = document.createElement('canvas');
+  let ctx = canvas.getContext('2d', { willReadFrequently: true });
+  let rafId = null;
+  let lastCode = null;
+  let lastCodeTime = 0;
+  const COOLDOWN_MS = 1500; // prevent double-count of same code held in frame
+
+  // items: { partNo: { count, firstTime, lastTime } }
+  let items = {};
+
+  function nowStr(){
+    const d = new Date();
+    return d.toLocaleTimeString('th-TH', { hour: '2-digit', minute:'2-digit', second:'2-digit' });
+  }
+
+  function vibrate(){
+    if (navigator.vibrate) navigator.vibrate(80);
+  }
+
+  function flashOnce(){
+    flash.classList.add('on');
+    setTimeout(()=> flash.classList.remove('on'), 150);
+  }
+
+  function beep(){
+    try {
+      const ctxA = new (window.AudioContext || window.webkitAudioContext)();
+      const o = ctxA.createOscillator();
+      const g = ctxA.createGain();
+      o.connect(g); g.connect(ctxA.destination);
+      o.frequency.value = 880;
+      g.gain.value = 0.08;
+      o.start();
+      setTimeout(()=>{ o.stop(); ctxA.close(); }, 100);
+    } catch(e) {}
+  }
+
+  function addScan(partNo){
+    partNo = partNo.trim();
+    if (!partNo) return;
+    const t = nowStr();
+    if (!items[partNo]) {
+      items[partNo] = { count: 1, firstTime: t, lastTime: t };
+    } else {
+      items[partNo].count += 1;
+      items[partNo].lastTime = t;
+    }
+    vibrate();
+    flashOnce();
+    beep();
+    render();
+  }
+
+  function adjustQty(partNo, delta){
+    if (!items[partNo]) return;
+    items[partNo].count += delta;
+    items[partNo].lastTime = nowStr();
+    if (items[partNo].count <= 0) delete items[partNo];
+    render();
+  }
+
+  function render(){
+    const keys = Object.keys(items);
+    totalBadge.textContent = keys.length + ' รายการ (' + keys.reduce((s,k)=>s+items[k].count,0) + ' ชิ้น)';
+    if (keys.length === 0) {
+      itemList.innerHTML = '';
+      itemList.appendChild(emptyState);
+      return;
+    }
+    // most recently scanned first
+    keys.sort((a,b) => (items[b].lastTime > items[a].lastTime ? 1 : -1));
+    itemList.innerHTML = keys.map(k => {
+      const it = items[k];
+      return `<div class="item-card">
+        <div class="item-info">
+          <div class="item-part">${escapeHtml(k)}</div>
+          <div class="item-time">ล่าสุด ${it.lastTime}</div>
+        </div>
+        <div class="item-qty">
+          <button class="qty-btn" data-action="dec" data-part="${escapeAttr(k)}">−</button>
+          <span class="qty-num">${it.count}</span>
+          <button class="qty-btn" data-action="inc" data-part="${escapeAttr(k)}">+</button>
+        </div>
+      </div>`;
+    }).join('');
+  }
+
+  function escapeHtml(s){
+    return s.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  }
+  function escapeAttr(s){ return escapeHtml(s); }
+
+  itemList.addEventListener('click', (e) => {
+    const btn = e.target.closest('.qty-btn');
+    if (!btn) return;
+    const part = btn.getAttribute('data-part');
+    const action = btn.getAttribute('data-action');
+    adjustQty(part, action === 'inc' ? 1 : -1);
+  });
+
+  manualInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      addScan(manualInput.value);
+      manualInput.value = '';
+    }
+  });
+
+  clearBtn.addEventListener('click', () => {
+    if (Object.keys(items).length === 0) return;
+    if (confirm('ล้างรายการนับทั้งหมด?')) {
+      items = {};
+      render();
+    }
+  });
+
+  exportBtn.addEventListener('click', () => {
+    const keys = Object.keys(items);
+    if (keys.length === 0) { alert('ยังไม่มีข้อมูลให้ export'); return; }
+    let csv = 'Part No,Quantity Counted,First Scan Time,Last Scan Time\n';
+    keys.forEach(k => {
+      const it = items[k];
+      csv += `"${k.replace(/"/g,'""')}",${it.count},"${it.firstTime}","${it.lastTime}"\n`;
+    });
+    const blob = new Blob(["\uFEFF" + csv], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    const d = new Date();
+    const fname = 'stock_count_' + d.toISOString().slice(0,10) + '_' + d.getHours() + d.getMinutes() + '.csv';
+    a.href = url; a.download = fname;
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  });
+
+  async function startCamera(){
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } }
+      });
+      video.srcObject = stream;
+      await video.play();
+      scanning = true;
+      toggleBtn.textContent = '⏸ หยุดสแกน';
+      statusBar.textContent = 'กำลังสแกน... เล็ง QR ให้อยู่ในกรอบ';
+      statusBar.classList.add('active');
+      tick();
+    } catch(err) {
+      statusBar.textContent = 'เปิดกล้องไม่ได้: ' + err.message + ' (ลองพิมพ์ Part No. เองด้านล่างแทน)';
+    }
+  }
+
+  function stopCamera(){
+    scanning = false;
+    if (rafId) cancelAnimationFrame(rafId);
+    if (stream) {
+      stream.getTracks().forEach(t => t.stop());
+      stream = null;
+    }
+    toggleBtn.textContent = '▶ เริ่มสแกน';
+    statusBar.textContent = 'หยุดสแกนแล้ว';
+    statusBar.classList.remove('active');
+  }
+
+  function tick(){
+    if (!scanning) return;
+    if (video.readyState === video.HAVE_ENOUGH_DATA) {
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      const code = jsQR(imgData.data, imgData.width, imgData.height, { inversionAttempts: 'dontInvert' });
+      if (code && code.data) {
+        const now = Date.now();
+        if (code.data !== lastCode || (now - lastCodeTime) > COOLDOWN_MS) {
+          lastCode = code.data;
+          lastCodeTime = now;
+          addScan(code.data);
+        }
+      }
+    }
+    rafId = requestAnimationFrame(tick);
+  }
+
+  toggleBtn.addEventListener('click', () => {
+    if (scanning) stopCamera(); else startCamera();
+  });
+
+  uploadBtn.addEventListener('click', () => {
+    fileInput.click();
+  });
+
+  fileInput.addEventListener('change', (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      const img = new Image();
+      img.onload = () => {
+        const c = document.createElement('canvas');
+        c.width = img.naturalWidth;
+        c.height = img.naturalHeight;
+        const cctx = c.getContext('2d', { willReadFrequently: true });
+        cctx.drawImage(img, 0, 0);
+        const imgData = cctx.getImageData(0, 0, c.width, c.height);
+        const code = jsQR(imgData.data, imgData.width, imgData.height, { inversionAttempts: 'attemptBoth' });
+        if (code && code.data) {
+          addScan(code.data);
+          statusBar.textContent = 'อ่านรูปภาพสำเร็จ: ' + code.data;
+          statusBar.classList.add('active');
+        } else {
+          statusBar.textContent = 'ไม่พบ QR ในรูปนี้ ลองรูปที่ชัดกว่านี้ หรือถ่ายให้ QR เต็มเฟรมมากขึ้น';
+          statusBar.classList.remove('active');
+        }
+      };
+      img.onerror = () => {
+        statusBar.textContent = 'เปิดไฟล์รูปภาพไม่ได้';
+      };
+      img.src = ev.target.result;
+    };
+    reader.readAsDataURL(file);
+    fileInput.value = ''; // allow re-selecting the same file next time
+  });
+
+  render();
+})();
+</script>
+
+</body>
+</html>
+    pointer-events: none;
+  }
+  .scan-box {
+    width: 62%; aspect-ratio: 1;
+    border: 3px solid #22d3ee;
+    border-radius: 12px;
+    box-shadow: 0 0 0 2000px rgba(0,0,0,0.35);
+  }
+  .flash {
+    position: absolute; inset: 0;
+    background: rgba(34,211,238,0.35);
+    opacity: 0;
+    transition: opacity 0.15s;
+    pointer-events: none;
+  }
+  .flash.on { opacity: 1; }
+
+  .status-bar {
+    padding: 8px 16px;
+    font-size: 12px;
+    color: #94a3b8;
+    text-align: center;
+    background: #1e293b;
+    border-bottom: 1px solid #334155;
+  }
+  .status-bar.active { color: #4ade80; }
+
   .controls { padding: 12px 16px; display: flex; gap: 8px; }
   button {
     border: none; border-radius: 10px; padding: 12px 14px;
